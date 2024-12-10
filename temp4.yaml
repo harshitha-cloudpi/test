@@ -1,0 +1,253 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for launching a CloudPi AMI on EC2 with VPC, subnets, security groups, Route 53 subdomain, and more.
+
+Parameters:
+  KeyName:
+    Type: String
+    Default: "cloudpi_private_key_202409091041.pem"
+    Description: The name of the EC2 key pair to access the instance.
+
+  AMIID:
+    Type: String
+    Default: "ami-0235132ab0b4bdeab"
+    Description: The ID of the AMI to launch the EC2 instance with.
+
+  InstanceType:
+    Type: String
+    Default: "t2.2xlarge"
+    Description: EC2 instance type for the CloudPi server.
+
+  HostedZoneId:
+    Type: String
+    Default: "Z02683563R82FW9FQQEON"
+    Description: The Route 53 hosted zone ID for your domain.
+
+  DomainName:
+    Type: String
+    Default: "cloudpie.ai"
+    Description: The domain name for subdomains.
+
+  Date:
+    Type: Number
+    Default: 101224  
+    Description: Enter Date in this format - ddmmyy
+
+Resources:
+  # VPC
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: CloudPiVPC
+
+  # Subnet 1 (Public)
+  Subnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  # Subnet 2 (Public)
+  Subnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.2.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  # Internet Gateway
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: CloudPiInternetGateway
+
+  # Attach Internet Gateway to VPC
+  AttachGateway:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route Table
+  RouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: CloudPiRouteTable
+
+  # Route to Internet (0.0.0.0/0)
+  Route:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  # Subnet 1 Route Table Association
+  Subnet1RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref Subnet1
+      RouteTableId: !Ref RouteTable
+
+  # Subnet 2 Route Table Association
+  Subnet2RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref RouteTable
+
+  # Security Group for EC2 Instance
+  InstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Enable SSH, HTTP, HTTPS, MySQL, Apache Superset, Flask
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0  # Open to all IPs (consider restricting to your IP)
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0  # Open to all IPs (consider restricting to your MySQL server IP)
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5001
+          ToPort: 5001
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 587
+          ToPort: 587
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5005
+          ToPort: 5005
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8088
+          ToPort: 8088
+          CidrIp: 0.0.0.0/0
+
+  # Elastic IP Allocation
+  ElasticIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      InstanceId: !Ref EC2Instance
+
+  # Route 53 Record Set for Subdomain
+  SubdomainRecord:
+    Type: "AWS::Route53::RecordSet"
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "client${Date}.cloudpie.ai."
+      Type: "A"
+      TTL: "300"
+      ResourceRecords:
+        - !Ref ElasticIP
+
+  # EC2 Instance
+  EC2Instance:
+    Type: "AWS::EC2::Instance"
+    DependsOn: AttachGateway
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName  # Reference KeyName parameter
+      ImageId: !Ref AMIID  # Reference AMIID parameter
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: 0
+          SubnetId: !Ref Subnet1
+          GroupSet: 
+            - !Ref InstanceSecurityGroup
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash
+          # CloudPi instance initialization script
+          chmod +x /home/ec2-user/cloudrestart.sh
+          /home/ec2-user/cloudrestart.sh
+
+          cat <<EOF > /home/ec2-user/restart_cloud.sh
+          #!/bin/bash
+
+          # Variables
+          new_ip=\$(curl http://checkip.amazonaws.com)
+          subdomain="client${Date}.cloudpie.ai"  # Subdomain dynamically set using ClientId
+          echo "Updating CloudPi with subdomain \$subdomain and IP \$new_ip"
+
+          # Update the frontend environment variables
+          frontend_env_file="/home/ec2-user/frontend_code/.env"
+
+          sed -i '/^VITE_APP_API_URL=/d' \$frontend_env_file
+          echo "VITE_APP_API_URL=http://\$subdomain:5001/" >> \$frontend_env_file
+
+          sed -i '/^VITE_APP_FLASK_API_URL=/d' \$frontend_env_file
+          echo "VITE_APP_FLASK_API_URL=http://\$subdomain:5005" >> \$frontend_env_file
+
+          sed -i '/^REACT_APP_API_URL=/d' \$frontend_env_file
+          echo "REACT_APP_API_URL=http://\$subdomain:5001/" >> \$frontend_env_file
+
+          sed -i '/^REACT_APP_FLASK_URL=/d' \$frontend_env_file
+          echo "REACT_APP_FLASK_URL=http://\$subdomain:5005" >> \$frontend_env_file
+
+          # Inject environment variables into the React app
+          cd /home/ec2-user/frontend_code
+          REACT_APP_FLASK_URL="http://\$subdomain:5005" REACT_APP_API_URL="http://\$subdomain:5001/" npx react-inject-env set
+
+          /usr/local/bin/pm2 start /usr/local/bin/http-server --name CloudPi-FE2.0 -- ./build -p 3000 -f --wait-ready
+
+          echo "Frontend configuration updated successfully."
+
+          # Update the Node.js environment variables
+          node_env_file="/home/ec2-user/node_scripts/.env"
+
+          sed -i '/^FLASK_API_URL=/d' \$node_env_file
+          echo "FLASK_API_URL=http://\$subdomain:5005" >> \$node_env_file
+
+          sed -i '/^NODE_API_URL=/d' \$node_env_file
+          echo "NODE_API_URL=http://\$subdomain:5001" >> \$node_env_file
+
+          sed -i '/^REACT_APP_ORIGIN_URL=/d' \$node_env_file
+          echo "REACT_APP_ORIGIN_URL=http://\$subdomain:3000" >> \$node_env_file
+
+          sed -i '/^SUPERSET_URL=/d' \$node_env_file
+          echo "SUPERSET_URL=http://\$subdomain:8088" >> \$node_env_file
+
+          # Restart Node.js service
+          cd /home/ec2-user/node_scripts
+          /usr/local/bin/pm2 start ./dist/app.js --name CloudPi-Node -f --wait-ready
+
+          echo "Node.js configuration updated successfully."
+
+          echo "Configuration update complete. CloudPi services restarted."
+          EOF
+
+          # Make the script executable and run it
+          chmod +x /home/ec2-user/restart_cloud.sh
+          /home/ec2-user/restart_cloud.sh
+
+          # Restart all PM2 services
+          pm2 restart all
